@@ -17,7 +17,6 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <errno.h>
-#include <sys/select.h>
 
 /* ── Constants ────────────────────────────────────────────────────────────── */
 #define MAX_PROJECTS  9
@@ -496,11 +495,12 @@ int main(void)
     keypad(stdscr, TRUE);
     curs_set(0);
 
-    /* Mouse – respond only on press so each click fires exactly once */
-    mousemask(BUTTON1_PRESSED, NULL);
+    /* Report all mouse button events so release events come back as KEY_MOUSE
+     * rather than leaking as raw bytes into the character stream. */
+    mousemask(ALL_MOUSE_EVENTS, NULL);
     mouseinterval(0);
 
-    /* Non-blocking getch – select() drives the 1-second tick, not ncurses */
+    /* Non-blocking getch – wall-clock time drives the tick, not ncurses */
     nodelay(stdscr, TRUE);
 
     /* Colors */
@@ -532,86 +532,74 @@ int main(void)
     /* Prime the tick */
     last_tick = time(NULL);
 
-    /* Debug log – written to /tmp/tt_debug.log so we can inspect it.
-     * Remove this block once the mouse issue is diagnosed. */
-    FILE *dbg = fopen("/tmp/tt_debug.log", "w");
-
     /* Main loop
-     * select() on stdin provides the guaranteed 1-second tick independently
-     * of ncurses's timeout machinery (which can be unreliable with mouse
-     * events in some terminals).  getch() is always non-blocking; select()
-     * is the only thing that ever waits. */
+     *
+     * The debug log revealed that select() on STDIN_FILENO always returns 0
+     * (timeout) on this system: ncurses reads from its own internal terminal
+     * fd (not fd 0), so select() on stdin never fires for any input.
+     *
+     * Fix: drive everything from wall-clock time() and a non-blocking
+     * getch() poll.  napms(10) keeps CPU usage low when idle.  The timer
+     * advances once per second based purely on time(), completely independent
+     * of what getch() returns. */
+    time_t last_draw = last_tick;
+    redraw();   /* show initial state immediately */
+
     int running = 1;
     while (running) {
-        /* ── Advance timer ── */
+        /* ── Timer tick: once per wall-clock second ── */
         time_t now = time(NULL);
-        if (!paused && current_project >= 0 && current_project < num_projects) {
-            long elapsed = (long)(now - last_tick);
-            if (elapsed > 0)
-                projects[current_project].seconds += elapsed;
-        }
-        last_tick = now;
-
-        redraw();
-
-        /* ── Wait up to 1 second for terminal input via select() ── */
-        struct timeval tv;
-        tv.tv_sec  = 1;
-        tv.tv_usec = 0;
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(STDIN_FILENO, &rfds);
-        int sel_ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
-        if (dbg) {
-            fprintf(dbg, "select=%d cur=%d paused=%d\n",
-                    sel_ret, current_project, paused);
-            fflush(dbg);
-        }
-        if (sel_ret <= 0)
-            continue;   /* timeout or signal – just tick and redraw */
-
-        /* ── Drain all pending input with non-blocking getch() ── */
-        int ch;
-        while (running && (ch = getch()) != ERR) {
-            if (dbg) {
-                fprintf(dbg, "  getch=%d KEY_MOUSE=%d\n", ch, KEY_MOUSE);
-                fflush(dbg);
+        if (now > last_draw) {
+            if (!paused && current_project >= 0 && current_project < num_projects) {
+                long elapsed = (long)(now - last_tick);
+                if (elapsed > 0)
+                    projects[current_project].seconds += elapsed;
             }
-            if (ch == KEY_MOUSE) {
-                MEVENT ev;
-                int mok = getmouse(&ev);
-                if (dbg) {
-                    fprintf(dbg, "  getmouse ok=%d bstate=%lx B1P=%lx\n",
-                            mok, (unsigned long)ev.bstate,
-                            (unsigned long)BUTTON1_PRESSED);
-                    fflush(dbg);
-                }
-                if (mok == OK && (ev.bstate & BUTTON1_PRESSED)) {
-                    int my = ev.y, mx = ev.x;
-                    for (int z = 0; z < num_zones; z++) {
-                        if (my == zones[z].y &&
-                            mx >= zones[z].x &&
-                            mx <  zones[z].x + zones[z].width)
-                        {
-                            int k = zones[z].key;
-                            if (k == 'q' || k == 'Q') running = 0;
-                            else                       handle_key(k);
-                            break;
-                        }
+            last_tick = now;
+            last_draw = now;
+            redraw();
+        }
+
+        /* ── Poll for one input event ── */
+        int ch = getch();
+        if (ch == ERR) {
+            napms(10);  /* ~10 ms sleep – avoids busy-spinning */
+            continue;
+        }
+
+        /* ── Handle the event ── */
+        int need_redraw = 0;
+        if (ch == KEY_MOUSE) {
+            MEVENT ev;
+            if (getmouse(&ev) == OK && (ev.bstate & BUTTON1_PRESSED)) {
+                int my = ev.y, mx = ev.x;
+                for (int z = 0; z < num_zones; z++) {
+                    if (my == zones[z].y &&
+                        mx >= zones[z].x &&
+                        mx <  zones[z].x + zones[z].width)
+                    {
+                        int k = zones[z].key;
+                        if (k == 'q' || k == 'Q') running = 0;
+                        else { handle_key(k); need_redraw = 1; }
+                        break;
                     }
                 }
-                /* Spurious mouse events: drain silently */
-            } else if (ch == 'q' || ch == 'Q') {
-                running = 0;
-                break;
-            } else {
-                handle_key(ch);
-                break;  /* one key action, then redraw */
             }
+            /* Release and other non-press events: KEY_MOUSE with no
+             * BUTTON1_PRESSED – just loop back, no redraw needed. */
+        } else if (ch == 'q' || ch == 'Q') {
+            running = 0;
+        } else {
+            handle_key(ch);
+            need_redraw = 1;
         }
-        if (dbg) { fprintf(dbg, "  drain done\n"); fflush(dbg); }
+
+        /* Immediate redraw after any action for responsive feel */
+        if (need_redraw) {
+            last_draw = time(NULL);
+            redraw();
+        }
     }
-    if (dbg) fclose(dbg);
 
     save_data();
     endwin();
