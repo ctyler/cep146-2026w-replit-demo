@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <errno.h>
+#include <sys/select.h>
 
 /* ── Constants ────────────────────────────────────────────────────────────── */
 #define MAX_PROJECTS  9
@@ -281,7 +282,7 @@ static void redraw(void)
     if (paused) {
         attron(COLOR_PAIR(CP_PAUSED) | A_BOLD);
         mvhline(status_row, 0, ' ', cols);
-        const char *pmsg = "  *** PAUSED – press SPACE to resume ***";
+        const char *pmsg = "  *** PAUSED - press SPACE to resume ***";
         mvprintw(status_row, (cols - (int)strlen(pmsg)) / 2, "%s", pmsg);
         attroff(COLOR_PAIR(CP_PAUSED) | A_BOLD);
     } else if (current_project >= 0 && current_project < num_projects) {
@@ -298,7 +299,7 @@ static void redraw(void)
         attron(COLOR_PAIR(CP_STATUS));
         mvhline(status_row, 0, ' ', cols);
         mvprintw(status_row, 2,
-                 "No project selected – press 1-%d to start tracking",
+                 "No project selected - press 1-%d to start tracking",
                  (num_projects > 0) ? num_projects : 9);
         attroff(COLOR_PAIR(CP_STATUS));
     }
@@ -499,6 +500,9 @@ int main(void)
     mousemask(BUTTON1_PRESSED, NULL);
     mouseinterval(0);
 
+    /* Non-blocking getch – select() drives the 1-second tick, not ncurses */
+    nodelay(stdscr, TRUE);
+
     /* Colors */
     if (has_colors()) {
         start_color();
@@ -529,18 +533,13 @@ int main(void)
     last_tick = time(NULL);
 
     /* Main loop
-     * One getch() per iteration with a 1-second timeout.
-     * getch() returns ERR after 1 s with no input (timer tick + redraw),
-     * or returns immediately when the user presses a key or clicks.
-     * The timer is advanced by actual wall-clock elapsed time each iteration,
-     * so it stays accurate regardless of how fast or slow input arrives. */
+     * select() on stdin provides the guaranteed 1-second tick independently
+     * of ncurses's timeout machinery (which can be unreliable with mouse
+     * events in some terminals).  getch() is always non-blocking; select()
+     * is the only thing that ever waits. */
     int running = 1;
     while (running) {
-        /* ── Wait for input (up to 1 second) ── */
-        timeout(1000);
-        int ch = getch();
-
-        /* ── Advance timer by wall-clock elapsed time ── */
+        /* ── Advance timer ── */
         time_t now = time(NULL);
         if (!paused && current_project >= 0 && current_project < num_projects) {
             long elapsed = (long)(now - last_tick);
@@ -549,33 +548,46 @@ int main(void)
         }
         last_tick = now;
 
-        /* ── Handle input ── */
-        if (ch == ERR) {
-            /* Timeout – just fall through to redraw */
-        } else if (ch == KEY_MOUSE) {
-            MEVENT ev;
-            if (getmouse(&ev) == OK && (ev.bstate & BUTTON1_PRESSED)) {
-                int my = ev.y, mx = ev.x;
-                for (int z = 0; z < num_zones; z++) {
-                    if (my == zones[z].y &&
-                        mx >= zones[z].x &&
-                        mx <  zones[z].x + zones[z].width)
-                    {
-                        int k = zones[z].key;
-                        if (k == 'q' || k == 'Q') running = 0;
-                        else                       handle_key(k);
-                        break;
+        redraw();
+
+        /* ── Wait up to 1 second for terminal input via select() ── */
+        struct timeval tv;
+        tv.tv_sec  = 1;
+        tv.tv_usec = 0;
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+        if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) <= 0)
+            continue;   /* timeout or signal – just tick and redraw */
+
+        /* ── Drain all pending input with non-blocking getch() ── */
+        int ch;
+        while (running && (ch = getch()) != ERR) {
+            if (ch == KEY_MOUSE) {
+                MEVENT ev;
+                if (getmouse(&ev) == OK && (ev.bstate & BUTTON1_PRESSED)) {
+                    int my = ev.y, mx = ev.x;
+                    for (int z = 0; z < num_zones; z++) {
+                        if (my == zones[z].y &&
+                            mx >= zones[z].x &&
+                            mx <  zones[z].x + zones[z].width)
+                        {
+                            int k = zones[z].key;
+                            if (k == 'q' || k == 'Q') running = 0;
+                            else                       handle_key(k);
+                            break;
+                        }
                     }
                 }
+                /* Spurious mouse events: drain silently */
+            } else if (ch == 'q' || ch == 'Q') {
+                running = 0;
+                break;
+            } else {
+                handle_key(ch);
+                break;  /* one key action, then redraw */
             }
-            /* Spurious mouse events (release, etc.) just cause a redraw */
-        } else if (ch == 'q' || ch == 'Q') {
-            running = 0;
-        } else {
-            handle_key(ch);
         }
-
-        redraw();
     }
 
     save_data();
