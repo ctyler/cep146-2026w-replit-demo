@@ -580,8 +580,9 @@ int main(void)
                     }
                     break;   /* redraw immediately after a real click */
                 }
-                /* Spurious event – keep polling without resetting deadline */
+                /* Spurious event – check deadline then keep polling */
                 napms(10);
+                if (time(NULL) >= deadline) break;
                 continue;
             }
 
