@@ -532,6 +532,10 @@ int main(void)
     /* Prime the tick */
     last_tick = time(NULL);
 
+    /* Debug log – written to /tmp/tt_debug.log so we can inspect it.
+     * Remove this block once the mouse issue is diagnosed. */
+    FILE *dbg = fopen("/tmp/tt_debug.log", "w");
+
     /* Main loop
      * select() on stdin provides the guaranteed 1-second tick independently
      * of ncurses's timeout machinery (which can be unreliable with mouse
@@ -557,15 +561,32 @@ int main(void)
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(STDIN_FILENO, &rfds);
-        if (select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv) <= 0)
+        int sel_ret = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+        if (dbg) {
+            fprintf(dbg, "select=%d cur=%d paused=%d\n",
+                    sel_ret, current_project, paused);
+            fflush(dbg);
+        }
+        if (sel_ret <= 0)
             continue;   /* timeout or signal – just tick and redraw */
 
         /* ── Drain all pending input with non-blocking getch() ── */
         int ch;
         while (running && (ch = getch()) != ERR) {
+            if (dbg) {
+                fprintf(dbg, "  getch=%d KEY_MOUSE=%d\n", ch, KEY_MOUSE);
+                fflush(dbg);
+            }
             if (ch == KEY_MOUSE) {
                 MEVENT ev;
-                if (getmouse(&ev) == OK && (ev.bstate & BUTTON1_PRESSED)) {
+                int mok = getmouse(&ev);
+                if (dbg) {
+                    fprintf(dbg, "  getmouse ok=%d bstate=%lx B1P=%lx\n",
+                            mok, (unsigned long)ev.bstate,
+                            (unsigned long)BUTTON1_PRESSED);
+                    fflush(dbg);
+                }
+                if (mok == OK && (ev.bstate & BUTTON1_PRESSED)) {
                     int my = ev.y, mx = ev.x;
                     for (int z = 0; z < num_zones; z++) {
                         if (my == zones[z].y &&
@@ -588,7 +609,9 @@ int main(void)
                 break;  /* one key action, then redraw */
             }
         }
+        if (dbg) { fprintf(dbg, "  drain done\n"); fflush(dbg); }
     }
+    if (dbg) fclose(dbg);
 
     save_data();
     endwin();
