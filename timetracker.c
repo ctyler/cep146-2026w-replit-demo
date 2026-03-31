@@ -343,8 +343,8 @@ static void add_project(void)
     mvhline(dy + 2, dx + 2, ' ', dw - 4);
     attroff(COLOR_PAIR(CP_NORMAL) | A_UNDERLINE);
 
-    /* Gather input */
-    echo();
+    /* Gather input – noecho throughout; we echo every character manually */
+    noecho();
     curs_set(1);
     timeout(-1);  /* blocking */
 
@@ -375,7 +375,7 @@ static void add_project(void)
 
     noecho();
     curs_set(0);
-    timeout(1000);
+    nodelay(stdscr, TRUE);  /* restore non-blocking mode */
 
     if (ch != 27 && pos > 0) {
         snprintf(projects[num_projects].name, MAX_NAME_LEN, "%s", name);
@@ -385,17 +385,73 @@ static void add_project(void)
     last_tick = time(NULL);  /* reset tick so we don't count dialog time */
 }
 
-/* ── Remove a project ─────────────────────────────────────────────────────── */
+/* ── Remove a project (with selection + confirmation dialogs) ─────────────── */
 static void remove_project(void)
 {
     if (num_projects == 0) return;
-    int idx = (current_project >= 0 && current_project < num_projects)
-              ? current_project : num_projects - 1;
 
+    int rows, cols;
+    getmaxyx(stdscr, rows, cols);
+
+    /* ── Step 1: let the user pick which project to remove ── */
+    int dh = num_projects + 5;
+    int dw = 56;
+    int dy = rows / 2 - dh / 2;
+    int dx = cols / 2 - dw / 2;
+
+    attron(COLOR_PAIR(CP_DIALOG) | A_BOLD);
+    for (int y = dy; y < dy + dh; y++)
+        mvhline(y, dx, ' ', dw);
+    mvprintw(dy + 1, dx + 2, "Select project to remove  (ESC to cancel):");
+    for (int i = 0; i < num_projects; i++)
+        mvprintw(dy + 2 + i, dx + 4, "[%d]  %s", i + 1, projects[i].name);
+    mvprintw(dy + dh - 2, dx + 2, "Press 1-%d:", num_projects);
+    attroff(COLOR_PAIR(CP_DIALOG) | A_BOLD);
+    refresh();
+
+    timeout(-1);
+    int ch = getch();
+    nodelay(stdscr, TRUE);
+
+    if (ch == 27 || ch < '1' || ch > '0' + num_projects) {
+        last_tick = time(NULL);
+        return;
+    }
+    int idx = ch - '1';
+
+    /* ── Step 2: confirm ── */
+    int cdh = 6, cdw = 56;
+    int cdy = rows / 2 - cdh / 2;
+    int cdx = cols / 2 - cdw / 2;
+
+    attron(COLOR_PAIR(CP_PAUSED) | A_BOLD);
+    for (int y = cdy; y < cdy + cdh; y++)
+        mvhline(y, cdx, ' ', cdw);
+    mvprintw(cdy + 1, cdx + 2, "Remove project:  %s", projects[idx].name);
+    mvprintw(cdy + 2, cdx + 2, "Accumulated time: ");
+    char tbuf[32];
+    fmt_time(projects[idx].seconds, tbuf, (int)sizeof(tbuf));
+    printw("%s", tbuf);
+    mvprintw(cdy + 3, cdx + 2, "This data will be lost!");
+    mvprintw(cdy + 4, cdx + 2, "Are you sure?  [Y]es / [N]o :");
+    attroff(COLOR_PAIR(CP_PAUSED) | A_BOLD);
+    refresh();
+
+    timeout(-1);
+    ch = getch();
+    nodelay(stdscr, TRUE);
+    last_tick = time(NULL);
+
+    if (ch != 'y' && ch != 'Y') return;
+
+    /* ── Actually remove ── */
+    if (current_project == idx)
+        current_project = -1;
     for (int i = idx; i < num_projects - 1; i++)
         projects[i] = projects[i + 1];
     num_projects--;
-
+    if (current_project > idx)
+        current_project--;
     if (current_project >= num_projects)
         current_project = num_projects - 1;
 }
@@ -443,8 +499,8 @@ int main(void)
     mousemask(BUTTON1_PRESSED, NULL);
     mouseinterval(0);
 
-    /* 1-second timeout for getch */
-    timeout(1000);
+    /* Non-blocking getch; the main loop drives redraws with napms() polling */
+    nodelay(stdscr, TRUE);
 
     /* Colors */
     if (has_colors()) {
@@ -475,10 +531,15 @@ int main(void)
     /* Prime the tick */
     last_tick = time(NULL);
 
-    /* Main loop */
+    /* Main loop
+     * Outer loop:  update timer, redraw, then enter inner polling loop.
+     * Inner loop:  check for input every 50 ms.  Break out after 1 second
+     *              (to redraw) or immediately after any real user action.
+     *              Spurious mouse events (release, motion) are drained
+     *              silently so they never block the 1-second tick. */
     int running = 1;
     while (running) {
-        /* Advance timer before drawing */
+        /* ── Advance timer ── */
         time_t now = time(NULL);
         if (!paused && current_project >= 0 && current_project < num_projects) {
             long elapsed = (long)(now - last_tick);
@@ -489,36 +550,45 @@ int main(void)
 
         redraw();
 
-        int ch = getch();
-        if (ch == ERR) continue;   /* timeout – loop again */
+        /* ── Inner input poll (max 1 second) ── */
+        time_t deadline = now + 1;
+        while (running) {
+            int ch = getch();
 
-        if (ch == KEY_MOUSE) {
-            MEVENT ev;
-            if (getmouse(&ev) == OK) {
-                int my = ev.y, mx = ev.x;
-                /* Check registered click zones */
-                for (int z = 0; z < num_zones; z++) {
-                    if (my == zones[z].y &&
-                        mx >= zones[z].x &&
-                        mx <  zones[z].x + zones[z].width)
-                    {
-                        int k = zones[z].key;
-                        if (k == 'q' || k == 'Q') {
-                            running = 0;
-                        } else {
-                            handle_key(k);
-                        }
-                        break;
-                    }
-                }
+            if (ch == ERR) {
+                /* No input yet – sleep 50 ms then check deadline */
+                napms(50);
+                if (time(NULL) >= deadline) break;   /* time to redraw */
+                continue;
             }
-            continue;
-        }
 
-        if (ch == 'q' || ch == 'Q') {
-            running = 0;
-        } else {
-            handle_key(ch);
+            if (ch == KEY_MOUSE) {
+                MEVENT ev;
+                /* Only act on real button-press events; drain everything else */
+                if (getmouse(&ev) == OK && (ev.bstate & BUTTON1_PRESSED)) {
+                    int my = ev.y, mx = ev.x;
+                    for (int z = 0; z < num_zones; z++) {
+                        if (my == zones[z].y &&
+                            mx >= zones[z].x &&
+                            mx <  zones[z].x + zones[z].width)
+                        {
+                            int k = zones[z].key;
+                            if (k == 'q' || k == 'Q') running = 0;
+                            else                       handle_key(k);
+                            break;
+                        }
+                    }
+                    break;   /* redraw immediately after a real click */
+                }
+                /* Spurious event – keep polling without resetting deadline */
+                napms(10);
+                continue;
+            }
+
+            /* Keyboard input */
+            if (ch == 'q' || ch == 'Q') running = 0;
+            else                         handle_key(ch);
+            break;   /* redraw after any keystroke */
         }
     }
 
