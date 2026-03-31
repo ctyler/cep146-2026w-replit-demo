@@ -460,12 +460,18 @@ static void remove_project(void)
     fmt_time(projects[idx].seconds, tbuf, (int)sizeof(tbuf));
     printw("%s", tbuf);
     mvprintw(cdy + 3, cdx + 2, "This data will be lost!");
-    mvprintw(cdy + 4, cdx + 2, "Are you sure?  [Y]es / [N]o :");
+    /* Draw the two clickable buttons and remember their screen positions. */
+    /* "Are you sure?  " is 15 chars wide, so [Y]es starts at cdx+2+15.  */
+    int yes_col = cdx + 17;   /* column where '[Y]es' starts */
+    int no_col  = cdx + 25;   /* column where '[N]o'  starts  (after " / ") */
+    int btn_row = cdy + 4;
+    mvprintw(btn_row, cdx + 2, "Are you sure?  [Y]es / [N]o :");
     attroff(COLOR_PAIR(CP_PAUSED) | A_BOLD);
     refresh();
 
-    /* Same pattern: loop until Y/N/ESC; ignore mouse events so a release
-     * from the previous click doesn't accidentally confirm or cancel. */
+    /* Loop until Y/N/ESC or a mouse click on one of the buttons.
+     * Release events from the click that opened this dialog are consumed
+     * silently so they cannot accidentally dismiss it. */
     timeout(-1);
     while (1) {
         ch = getch();
@@ -477,11 +483,24 @@ static void remove_project(void)
         }
         if (ch == KEY_MOUSE) {
             MEVENT ev;
-            getmouse(&ev);   /* consume the event so ncurses queue stays clean */
-            /* Ignore all mouse events in the confirmation dialog */
+            if (getmouse(&ev) == OK && (ev.bstate & BUTTON1_PRESSED)) {
+                if (ev.y == btn_row) {
+                    /* Click on [Y]es ? */
+                    if (ev.x >= yes_col && ev.x < yes_col + 5)
+                        goto confirmed;
+                    /* Click on [N]o ? */
+                    if (ev.x >= no_col && ev.x < no_col + 4) {
+                        nodelay(stdscr, TRUE);
+                        last_tick = time(NULL);
+                        return;
+                    }
+                }
+            }
+            /* Release or off-button click: keep waiting */
         }
         /* Any other key: ignore, keep waiting */
     }
+    confirmed:
     nodelay(stdscr, TRUE);
     last_tick = time(NULL);
 
