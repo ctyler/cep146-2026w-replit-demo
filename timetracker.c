@@ -499,9 +499,6 @@ int main(void)
     mousemask(BUTTON1_PRESSED, NULL);
     mouseinterval(0);
 
-    /* Non-blocking getch; the main loop drives redraws with napms() polling */
-    nodelay(stdscr, TRUE);
-
     /* Colors */
     if (has_colors()) {
         start_color();
@@ -532,14 +529,18 @@ int main(void)
     last_tick = time(NULL);
 
     /* Main loop
-     * Outer loop:  update timer, redraw, then enter inner polling loop.
-     * Inner loop:  check for input every 50 ms.  Break out after 1 second
-     *              (to redraw) or immediately after any real user action.
-     *              Spurious mouse events (release, motion) are drained
-     *              silently so they never block the 1-second tick. */
+     * One getch() per iteration with a 1-second timeout.
+     * getch() returns ERR after 1 s with no input (timer tick + redraw),
+     * or returns immediately when the user presses a key or clicks.
+     * The timer is advanced by actual wall-clock elapsed time each iteration,
+     * so it stays accurate regardless of how fast or slow input arrives. */
     int running = 1;
     while (running) {
-        /* ── Advance timer ── */
+        /* ── Wait for input (up to 1 second) ── */
+        timeout(1000);
+        int ch = getch();
+
+        /* ── Advance timer by wall-clock elapsed time ── */
         time_t now = time(NULL);
         if (!paused && current_project >= 0 && current_project < num_projects) {
             long elapsed = (long)(now - last_tick);
@@ -548,49 +549,33 @@ int main(void)
         }
         last_tick = now;
 
-        redraw();
-
-        /* ── Inner input poll (max 1 second) ── */
-        time_t deadline = now + 1;
-        while (running) {
-            int ch = getch();
-
-            if (ch == ERR) {
-                /* No input yet – sleep 50 ms then check deadline */
-                napms(50);
-                if (time(NULL) >= deadline) break;   /* time to redraw */
-                continue;
-            }
-
-            if (ch == KEY_MOUSE) {
-                MEVENT ev;
-                /* Only act on real button-press events; drain everything else */
-                if (getmouse(&ev) == OK && (ev.bstate & BUTTON1_PRESSED)) {
-                    int my = ev.y, mx = ev.x;
-                    for (int z = 0; z < num_zones; z++) {
-                        if (my == zones[z].y &&
-                            mx >= zones[z].x &&
-                            mx <  zones[z].x + zones[z].width)
-                        {
-                            int k = zones[z].key;
-                            if (k == 'q' || k == 'Q') running = 0;
-                            else                       handle_key(k);
-                            break;
-                        }
+        /* ── Handle input ── */
+        if (ch == ERR) {
+            /* Timeout – just fall through to redraw */
+        } else if (ch == KEY_MOUSE) {
+            MEVENT ev;
+            if (getmouse(&ev) == OK && (ev.bstate & BUTTON1_PRESSED)) {
+                int my = ev.y, mx = ev.x;
+                for (int z = 0; z < num_zones; z++) {
+                    if (my == zones[z].y &&
+                        mx >= zones[z].x &&
+                        mx <  zones[z].x + zones[z].width)
+                    {
+                        int k = zones[z].key;
+                        if (k == 'q' || k == 'Q') running = 0;
+                        else                       handle_key(k);
+                        break;
                     }
-                    break;   /* redraw immediately after a real click */
                 }
-                /* Spurious event – check deadline then keep polling */
-                napms(10);
-                if (time(NULL) >= deadline) break;
-                continue;
             }
-
-            /* Keyboard input */
-            if (ch == 'q' || ch == 'Q') running = 0;
-            else                         handle_key(ch);
-            break;   /* redraw after any keystroke */
+            /* Spurious mouse events (release, etc.) just cause a redraw */
+        } else if (ch == 'q' || ch == 'Q') {
+            running = 0;
+        } else {
+            handle_key(ch);
         }
+
+        redraw();
     }
 
     save_data();
