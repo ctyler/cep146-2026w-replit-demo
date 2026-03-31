@@ -208,11 +208,11 @@ static void redraw(void)
 
     /* ── Column header ─────────────────────────────────── */
     attron(COLOR_PAIR(CP_HEADER) | A_BOLD | A_UNDERLINE);
-    mvprintw(2, 1, " # %-*s  %-8s  %-7s  %-*s",
+    mvprintw(2, 1, "No %-*s  %-8s  %-7s  %-*s",
              MAX_NAME_LEN - 1, "Project",
              "Time",
              "   %",
-             BAR_WIDTH, "Progress");
+             BAR_WIDTH, "Percentage");
     attroff(COLOR_PAIR(CP_HEADER) | A_BOLD | A_UNDERLINE);
 
     /* ── Total time ────────────────────────────────────── */
@@ -253,17 +253,17 @@ static void redraw(void)
             attroff(COLOR_PAIR(CP_NORMAL));
         }
 
-        /* Progress bar */
+        /* Progress bar – solid colour blocks, no ACS characters */
         int bar_x = getcurx(stdscr);
-        /* Filled portion */
-        attron(COLOR_PAIR(CP_BAR_FILL) | A_BOLD);
+        /* Filled portion: space with cyan background → solid coloured bar */
+        attron(COLOR_PAIR(CP_BAR_FILL));
         for (int b = 0; b < bar_fill; b++)
-            mvaddch(row, bar_x + b, ACS_BLOCK);
-        attroff(COLOR_PAIR(CP_BAR_FILL) | A_BOLD);
-        /* Empty portion */
+            mvaddch(row, bar_x + b, ' ');
+        attroff(COLOR_PAIR(CP_BAR_FILL));
+        /* Empty portion: dash with lighter colour */
         attron(COLOR_PAIR(CP_BAR_EMPTY));
         for (int b = bar_fill; b < BAR_WIDTH; b++)
-            mvaddch(row, bar_x + b, ACS_BULLET);
+            mvaddch(row, bar_x + b, '-');
         attroff(COLOR_PAIR(CP_BAR_EMPTY));
 
         /* Register click zone for the whole project row */
@@ -439,8 +439,8 @@ int main(void)
     keypad(stdscr, TRUE);
     curs_set(0);
 
-    /* Mouse */
-    mousemask(BUTTON1_PRESSED | BUTTON1_CLICKED | BUTTON1_RELEASED, NULL);
+    /* Mouse – respond only on press so each click fires exactly once */
+    mousemask(BUTTON1_PRESSED, NULL);
     mouseinterval(0);
 
     /* 1-second timeout for getch */
