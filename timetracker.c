@@ -405,19 +405,46 @@ static void remove_project(void)
     mvprintw(dy + 1, dx + 2, "Select project to remove  (ESC to cancel):");
     for (int i = 0; i < num_projects; i++)
         mvprintw(dy + 2 + i, dx + 4, "[%d]  %s", i + 1, projects[i].name);
-    mvprintw(dy + dh - 2, dx + 2, "Press 1-%d:", num_projects);
+    mvprintw(dy + dh - 2, dx + 2, "Press 1-%d or click a project:", num_projects);
     attroff(COLOR_PAIR(CP_DIALOG) | A_BOLD);
     refresh();
 
+    /* Loop until we get a valid keyboard selection, a click on a project row,
+     * or ESC.  Mouse button-release and other events are silently ignored so
+     * the dialog stays open after the click that opened it. */
     timeout(-1);
-    int ch = getch();
-    nodelay(stdscr, TRUE);
-
-    if (ch == 27 || ch < '1' || ch > '0' + num_projects) {
-        last_tick = time(NULL);
-        return;
+    int idx = -1;
+    int ch;
+    while (idx < 0) {
+        ch = getch();
+        if (ch == 27) {                         /* ESC – cancel */
+            nodelay(stdscr, TRUE);
+            last_tick = time(NULL);
+            return;
+        }
+        if (ch >= '1' && ch <= '0' + num_projects) {
+            idx = ch - '1';
+            break;
+        }
+        if (ch == KEY_MOUSE) {
+            MEVENT ev;
+            if (getmouse(&ev) == OK && (ev.bstate & BUTTON1_PRESSED)) {
+                /* Click inside the dialog on one of the project rows? */
+                if (ev.x >= dx && ev.x < dx + dw) {
+                    for (int i = 0; i < num_projects; i++) {
+                        if (ev.y == dy + 2 + i) {
+                            idx = i;
+                            break;
+                        }
+                    }
+                }
+                /* Click outside the dialog or on non-project row: ignore */
+            }
+            /* Release events and other mouse events: ignore, keep waiting */
+        }
+        /* Any other key: ignore, keep waiting */
     }
-    int idx = ch - '1';
+    nodelay(stdscr, TRUE);
 
     /* ── Step 2: confirm ── */
     int cdh = 6, cdw = 56;
@@ -437,12 +464,26 @@ static void remove_project(void)
     attroff(COLOR_PAIR(CP_PAUSED) | A_BOLD);
     refresh();
 
+    /* Same pattern: loop until Y/N/ESC; ignore mouse events so a release
+     * from the previous click doesn't accidentally confirm or cancel. */
     timeout(-1);
-    ch = getch();
+    while (1) {
+        ch = getch();
+        if (ch == 'y' || ch == 'Y') break;
+        if (ch == 'n' || ch == 'N' || ch == 27) {
+            nodelay(stdscr, TRUE);
+            last_tick = time(NULL);
+            return;
+        }
+        if (ch == KEY_MOUSE) {
+            MEVENT ev;
+            getmouse(&ev);   /* consume the event so ncurses queue stays clean */
+            /* Ignore all mouse events in the confirmation dialog */
+        }
+        /* Any other key: ignore, keep waiting */
+    }
     nodelay(stdscr, TRUE);
     last_tick = time(NULL);
-
-    if (ch != 'y' && ch != 'Y') return;
 
     /* ── Actually remove ── */
     if (current_project == idx)
